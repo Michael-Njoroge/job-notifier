@@ -26,6 +26,7 @@ from config import (
     active_sources,
 )
 from sources.linkedin import get_linkedin_searches
+from sources.curated_links import get_curated_links
 
 
 load_dotenv()
@@ -216,7 +217,12 @@ def is_relevant_job(job: dict, source: dict) -> bool:
     Remote sources:
         Accept jobs that are marked/identified as remote.
 
-    In both cases:
+    Mixed sources (e.g. a single company's ATS board covering many
+    offices/regions at once — Greenhouse/Ashby/Workable company feeds):
+        Accept jobs that are either Kenya-based or remote, since the
+        source itself doesn't guarantee either on its own.
+
+    In all cases:
         The title must be a software-development role.
     """
 
@@ -232,6 +238,9 @@ def is_relevant_job(job: dict, source: dict) -> bool:
 
     if region == "remote_worldwide":
         return is_remote_job(job)
+
+    if region == "mixed":
+        return is_kenya_job(job) or is_remote_job(job)
 
     return True
 
@@ -269,6 +278,43 @@ def fetch_rss(url: str) -> list[dict]:
                 "link": link,
                 "description": description,
                 "location": "",
+            }
+        )
+
+    return jobs
+
+
+def fetch_remotive(url: str) -> list[dict]:
+    """
+    Remotive's RSS feed (remotive.com/feed) was retired; they now serve a
+    public JSON API instead. https://remotive.com/api-documentation
+    """
+
+    response = requests.get(
+        url,
+        headers={"User-Agent": USER_AGENT},
+        timeout=REQUEST_TIMEOUT,
+    )
+
+    response.raise_for_status()
+
+    data = response.json()
+
+    jobs = []
+
+    for item in data.get("jobs", []):
+        title = (item.get("title") or "").strip()
+        link = (item.get("url") or "").strip()
+
+        if not title or not link:
+            continue
+
+        jobs.append(
+            {
+                "title": title,
+                "link": link,
+                "description": item.get("description") or "",
+                "location": item.get("candidate_required_location") or "Remote",
             }
         )
 
@@ -328,6 +374,258 @@ def fetch_remoteok(url: str) -> list[dict]:
     return jobs
 
 
+def fetch_greenhouse(url: str) -> list[dict]:
+    """
+    Greenhouse Job Board API — public, unauthenticated, per-company.
+    https://boards-api.greenhouse.io/v1/boards/{board_token}/jobs
+    """
+
+    response = requests.get(
+        url,
+        headers={"User-Agent": USER_AGENT},
+        timeout=REQUEST_TIMEOUT,
+    )
+
+    response.raise_for_status()
+
+    data = response.json()
+
+    jobs = []
+
+    for item in data.get("jobs", []):
+        title = (item.get("title") or "").strip()
+        link = (item.get("absolute_url") or "").strip()
+
+        if not title or not link:
+            continue
+
+        location = (item.get("location") or {}).get("name", "") or ""
+
+        jobs.append(
+            {
+                "title": title,
+                "link": link,
+                "description": "",
+                "location": location,
+            }
+        )
+
+    return jobs
+
+
+def fetch_ashby(url: str) -> list[dict]:
+    """
+    Ashby public posting API — public, unauthenticated, per-company.
+    https://api.ashbyhq.com/posting-api/job-board/{job_board_name}
+    """
+
+    response = requests.get(
+        url,
+        headers={"User-Agent": USER_AGENT},
+        timeout=REQUEST_TIMEOUT,
+    )
+
+    response.raise_for_status()
+
+    data = response.json()
+
+    jobs = []
+
+    for item in data.get("jobs", []):
+        title = (item.get("title") or "").strip()
+        link = (item.get("jobUrl") or "").strip()
+
+        if not title or not link:
+            continue
+
+        location = item.get("location") or ""
+
+        if item.get("isRemote") and "remote" not in location.lower():
+            location = (location + " Remote").strip()
+
+        jobs.append(
+            {
+                "title": title,
+                "link": link,
+                "description": "",
+                "location": location,
+            }
+        )
+
+    return jobs
+
+
+def fetch_workable(url: str) -> list[dict]:
+    """
+    Workable widget API — public, unauthenticated, per-company.
+    https://apply.workable.com/api/v1/widget/accounts/{account}
+    """
+
+    response = requests.get(
+        url,
+        headers={"User-Agent": USER_AGENT},
+        timeout=REQUEST_TIMEOUT,
+    )
+
+    response.raise_for_status()
+
+    data = response.json()
+
+    jobs = []
+
+    for item in data.get("jobs", []):
+        title = (item.get("title") or "").strip()
+        link = (
+            item.get("url")
+            or item.get("shortlink")
+            or ""
+        ).strip()
+
+        if not title or not link:
+            continue
+
+        location_parts = [
+            part
+            for part in [item.get("city"), item.get("country")]
+            if part
+        ]
+
+        location = ", ".join(location_parts)
+
+        if item.get("telecommuting"):
+            location = (location + " Remote").strip()
+
+        jobs.append(
+            {
+                "title": title,
+                "link": link,
+                "description": "",
+                "location": location,
+            }
+        )
+
+    return jobs
+
+
+def fetch_himalayas(url: str) -> list[dict]:
+    """
+    Himalayas Remote Jobs API — public, unauthenticated.
+    https://himalayas.app/docs/remote-jobs-api
+    """
+
+    response = requests.get(
+        url,
+        headers={"User-Agent": USER_AGENT},
+        timeout=REQUEST_TIMEOUT,
+    )
+
+    response.raise_for_status()
+
+    data = response.json()
+
+    jobs = []
+
+    for item in data.get("jobs", []):
+        title = (item.get("title") or "").strip()
+        link = (item.get("applicationLink") or "").strip()
+
+        if not title or not link:
+            continue
+
+        restrictions = item.get("locationRestrictions") or []
+
+        location = (
+            "Remote"
+            if not restrictions
+            else ", ".join(restrictions)
+        )
+
+        jobs.append(
+            {
+                "title": title,
+                "link": link,
+                "description": item.get("excerpt") or "",
+                "location": location,
+            }
+        )
+
+    return jobs
+
+
+def fetch_jobicy(url: str) -> list[dict]:
+    """
+    Jobicy Remote Jobs API — public, unauthenticated.
+    https://jobicy.com/jobs-rss-feed (API docs linked from here)
+    """
+
+    response = requests.get(
+        url,
+        headers={"User-Agent": USER_AGENT},
+        timeout=REQUEST_TIMEOUT,
+    )
+
+    response.raise_for_status()
+
+    data = response.json()
+
+    jobs = []
+
+    for item in data.get("jobs", []):
+        title = (item.get("jobTitle") or "").strip()
+        link = (item.get("url") or "").strip()
+
+        if not title or not link:
+            continue
+
+        jobs.append(
+            {
+                "title": title,
+                "link": link,
+                "description": item.get("jobExcerpt") or "",
+                "location": item.get("jobGeo") or "Remote",
+            }
+        )
+
+    return jobs
+
+
+def fetch_working_nomads(url: str) -> list[dict]:
+    """
+    Working Nomads exposed-jobs API — public, unauthenticated.
+    Every listing on this board is remote by definition.
+    """
+
+    response = requests.get(
+        url,
+        headers={"User-Agent": USER_AGENT},
+        timeout=REQUEST_TIMEOUT,
+    )
+
+    response.raise_for_status()
+
+    data = response.json()
+
+    jobs = []
+
+    for item in data:
+        title = (item.get("title") or "").strip()
+        link = (item.get("url") or "").strip()
+
+        if not title or not link:
+            continue
+
+        jobs.append(
+            {
+                "title": title,
+                "link": link,
+                "description": item.get("description") or "",
+                "location": "Remote",
+            }
+        )
+
+    return jobs
+
+
 def fetch_source(source: dict) -> list[dict]:
     try:
         if source["type"] == "rss":
@@ -337,6 +635,41 @@ def fetch_source(source: dict) -> list[dict]:
 
         if source["type"] == "json_remoteok":
             return fetch_remoteok(
+                source["url"]
+            )
+
+        if source["type"] == "json_remotive":
+            return fetch_remotive(
+                source["url"]
+            )
+
+        if source["type"] == "json_greenhouse":
+            return fetch_greenhouse(
+                source["url"]
+            )
+
+        if source["type"] == "json_ashby":
+            return fetch_ashby(
+                source["url"]
+            )
+
+        if source["type"] == "json_workable":
+            return fetch_workable(
+                source["url"]
+            )
+
+        if source["type"] == "json_himalayas":
+            return fetch_himalayas(
+                source["url"]
+            )
+
+        if source["type"] == "json_jobicy":
+            return fetch_jobicy(
+                source["url"]
+            )
+
+        if source["type"] == "json_working_nomads":
+            return fetch_working_nomads(
                 source["url"]
             )
 
@@ -616,6 +949,85 @@ def build_linkedin_section() -> str:
 """
 
 
+def build_curated_links_section() -> str:
+    links = get_curated_links()
+
+    rows = []
+
+    for item in links:
+        name = html.escape(
+            item["name"]
+        )
+
+        url = html.escape(
+            item["url"],
+            quote=True,
+        )
+
+        rows.append(
+            f"""
+<tr>
+<td style="padding:6px 0;">
+<a href="{url}"
+   style="
+     color:#2563eb;
+     text-decoration:none;
+     font-size:14px;
+     font-weight:600;
+   ">
+  {name} →
+</a>
+</td>
+</tr>
+"""
+        )
+
+    links_html = "".join(rows)
+
+    return f"""
+<h2 style="
+  margin:30px 0 12px 0;
+  font-size:17px;
+  color:#0f172a;
+">
+  🧭 Also Worth Checking Manually
+</h2>
+
+<table role="presentation"
+       width="100%"
+       cellpadding="0"
+       cellspacing="0"
+       style="
+         border:1px solid #e2e8f0;
+         border-radius:12px;
+         background:#ffffff;
+       ">
+
+<tr>
+<td style="padding:20px 22px;">
+
+<div style="
+  font-size:13px;
+  color:#64748b;
+  margin-bottom:12px;
+">
+  No public feed to auto-poll for these — worth a manual check.
+</div>
+
+<table role="presentation"
+       width="100%"
+       cellpadding="0"
+       cellspacing="0">
+  {links_html}
+</table>
+
+</td>
+</tr>
+
+</table>
+"""
+
+
 def build_html(
     new_jobs_by_source: dict,
 ) -> str:
@@ -696,6 +1108,10 @@ def build_html(
 
     linkedin_section = (
         build_linkedin_section()
+    )
+
+    curated_links_section = (
+        build_curated_links_section()
     )
 
     today = datetime.now().strftime(
@@ -899,6 +1315,8 @@ Daily Developer Job Digest
 
 {linkedin_section}
 
+{curated_links_section}
+
 </td>
 
 </tr>
@@ -1050,11 +1468,15 @@ def main() -> None:
             if job_id in seen:
                 continue
 
-            if not is_relevant_job(
-                job,
-                source,
-            ):
+            if not is_relevant_job(job, source):
+                print(
+                    f"[debug] REJECTED: {job['title']}"
+                )
                 continue
+
+            print(
+                f"[debug] MATCHED: {job['title']}"
+            )
 
             new_matches.append(job)
 
